@@ -9,13 +9,16 @@
 ## Installation
 
 ### 1. Clone the repo
-
-```bash
+```
+bash
 git clone https://github.com/yourname/polytrade.git
-cd polytrade```
+cd polytrade
+```
 
 ### 2. Install Dependencies
-```pip install -r requirements.txt```
+```
+pip install -r requirements.txt
+```
 
 ### 3. Setup environment variables
 ```
@@ -80,5 +83,6 @@ tracked_wallets = {
 │
 ├── .env # API keys and secrets
 └── requirements.txt # Python dependencies```
+
 
 
