@@ -1,71 +1,82 @@
 import asyncio
+import aiohttp
 import time
-from typing import Dict, List, Tuple
-from utils.polymarket import fetch_user_trades
+from typing import Dict, Tuple
+
+from utils.polymarket import (
+    fetch_user_trades,
+    get_market_price,
+    create_order,
+    tracked_wallets,
+)
 from utils.telegram import send_markdown
 
-user_polymarket_address = "8YpWjJFkHaz54gqgCSbWgenmHE2STqBQveFjMin6PACF"  # Solana
+
+# wallet -> (timestamp, transactionHash)
+last_seen: Dict[str, Tuple[int, str]] = {}
+
+POLL_INTERVAL = 2.0  # seconds
 
 
-LastPtr = Tuple[int, str]
-last_seen: Dict[str, LastPtr] = {}
+async def handle_trade(session: aiohttp.ClientSession, trade: dict, name: str) -> None:
+    try:
+        token_id = trade["asset"]
+        side = trade["side"]  # "BUY"/"SELL"
+        size = float(trade["size"])
+        ref_price = float(trade["price"])
+        timestamp = int(trade["timestamp"])
+        tx = trade.get("transactionHash", "")
 
-tracked_wallets = []
-address_to_scale = {}
+        market_price = await get_market_price(session, token_id, side)
+        if market_price is None:
+            return
 
+        resp = create_order(price=market_price, size=size, side=side, token_id=token_id)
+        if not resp:
+            return
 
-def ptr_of(t: dict) -> LastPtr:
-    ts = int(t.get("timestamp", 0))
-    tx = t.get("transactionHash", "") or ""
-    return (ts, tx)
+        msg = (
+            f"*Copied Trade*\n"
+            f"{name} — {side} {size} @ {ref_price}\n"
+            f"`token_id:` `{token_id}`\n"
+            f"`tx:` `{tx}`\n"
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(timestamp))} UTC"
+        )
+        await send_markdown(msg)
 
-
-def is_newer(prev: LastPtr | None, cur: LastPtr) -> bool:
-    if prev is None:
-        return True
-    # compare by (timestamp, txhash)
-    return cur > prev
-
-
-async def notify_trade(t: dict, addr_to_name: Dict[str, str]):
-    addr = t["proxyWallet"].lower()
-    who = addr_to_name.get(addr, addr[:6] + "…" + addr[-4:])
-    side = t["side"]
-    size = t["size"]
-    price = t["price"]
-    outcome = t.get("outcome") or ""
-    title = t.get("title") or t.get("slug") or ""
-    token_id = t.get("asset")  # use this when placing orders
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t["timestamp"])))
-
-    msg = (
-        f"*{who}* — *{side}* {size} @ {price}\n"
-        f"`{outcome}` — {title}\n"
-        f"`token_id:` `{token_id}`\n"
-        f"`tx:` `{t.get('transactionHash','')}`\n"
-        f"{ts} UTC"
-    )
-    await send_markdown(msg)
+    except Exception as e:
+        print(f"[handle_trade] Error: {e}")
 
 
-async def watch_users(addresses: List[str], addr_to_name: Dict[str, str], period_s=2.0):
-    addrs = [a.lower() for a in addresses]
-    while True:
-        start = time.time()
-        for addr in addrs:
+async def main() -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
             try:
-                trades = fetch_user_trades(addr, limit=50)
-                # process oldest→newest so we don’t miss anything
-                for t in reversed(trades):
-                    cur = ptr_of(t)
-                    if is_newer(last_seen.get(addr), cur):
-                        await notify_trade(t, addr_to_name)
-                        # TODO: when you’re ready to copy:
-                        # await copy_trade(t)  # use t["asset"] as token_id, t["side"], t["price"], t["size"]
-                        last_seen[addr] = cur
+                for wallet, name in tracked_wallets.items():
+                    # ✅ pass session AND wallet, and await
+                    trades = await fetch_user_trades(session, wallet, limit=50)
+                    if not trades:
+                        continue
+
+                    # process oldest → newest so bursts aren’t skipped
+                    trades.sort(key=lambda t: int(t["timestamp"]))
+
+                    for t in trades:
+                        tx = t.get("transactionHash", "") or ""
+                        ts = int(t["timestamp"])
+                        ptr = last_seen.get(wallet)
+
+                        if ptr and (ts, tx) <= ptr:
+                            continue
+
+                        await handle_trade(session, t, name)
+                        last_seen[wallet] = (ts, tx)
+
+                await asyncio.sleep(POLL_INTERVAL)
+
             except Exception as e:
-                # optional: alert/log
-                # await send_markdown(f"_watch error {addr}_: `{e}`")
-                pass
-        elapsed = time.time() - start
-        await asyncio.sleep(max(0.1, period_s - elapsed + 0.05))
+                print(f"[main loop] Error: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

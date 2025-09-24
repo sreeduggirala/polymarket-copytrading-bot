@@ -8,8 +8,8 @@ load_dotenv()
 
 TG_API_ID = int(os.getenv("TG_API_ID"))
 TG_API_HASH = os.getenv("TG_API_HASH")
-TG_CHANNEL = os.getenv("TG_CHANNEL")  # e.g. -1001234567890
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")  # required (bot-only)
+TG_CHANNEL = os.getenv("TG_CHANNEL")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 
 if not TG_BOT_TOKEN:
     raise RuntimeError("TG_BOT_TOKEN is required. Refusing to use user auth.")
@@ -37,7 +37,7 @@ async def send_markdown(msg: str) -> None:
             entity=TG_CHANNEL,
             message=msg,
             link_preview=False,
-            parse_mode="md",  # set per-call (works on current Telethon)
+            parse_mode="md",
         )
     except FloodWaitError as e:
         await asyncio.sleep(e.seconds)
