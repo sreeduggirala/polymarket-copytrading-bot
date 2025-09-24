@@ -15,7 +15,7 @@ git clone https://github.com/yourname/polytrade.git
 cd polytrade```
 
 ### 2. Install Dependencies
-`pip install -r requirements.txt`
+```pip install -r requirements.txt```
 
 ### 3. Setup environment variables
 ```
@@ -24,8 +24,7 @@ PRIVATE_KEY=0xabc123...
 TG_API_ID=1234567
 TG_API_HASH=abcdef1234567890abcdef
 TG_CHANNEL=-1001234567890        
-TG_BOT_TOKEN=123456:ABCDEF-BOTTOKEN
-```
+TG_BOT_TOKEN=123456:ABCDEF-BOTTOKEN```
 
 ### Copytrading Mode (Live Trading)
 `python main.py`
@@ -81,4 +80,5 @@ tracked_wallets = {
 │
 ├── .env # API keys and secrets
 └── requirements.txt # Python dependencies```
+
 
