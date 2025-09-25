@@ -136,3 +136,6 @@ cython_debug/
 
 # PyCharm
 .idea/
+
+.session
+.session-journal

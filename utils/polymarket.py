@@ -14,16 +14,6 @@ CHAIN_ID = 137
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("POLYMARKET_PROXY_ADDRESS")
 
-tracked_wallets: Dict[str, str] = {
-    "0x751a2b86cab503496efd325c8344e10159349ea1": "Sharky6999",
-    "0x6bab41a0dc40d6dd4c1a915b8c01969479fd1292": "Dropper",
-    "0x44c1dfe43260c94ed4f1d00de2e1f80fb113ebc1": "tomatosauce",
-    "0xd218e474776403a330142299f7796e8ba32eb5c9": "cigarettes",
-    "0x6ffb4354cbe6e0f9989e3b55564ec5fb8646a834": "AgricultureSecretary",
-    "0xd189664c5308903476f9f079820431e4fd7d06f4": "rwo",
-    "0xa9b44dca52ed35e59ac2a6f49d1203b8155464ed": "VvVv",
-}
-
 scalar = 0.01
 
 if not PRIVATE_KEY:
