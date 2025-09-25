@@ -1,51 +1,26 @@
+# telegram.py — minimal async Telegram sender using Bot API (no Telethon)
 import os
-import asyncio
+import aiohttp
 from dotenv import load_dotenv
-from telethon import TelegramClient
-from telethon.errors import FloodWaitError, ChannelPrivateError
 
 load_dotenv()
-
-TG_API_ID = int(os.getenv("TG_API_ID"))
-TG_API_HASH = os.getenv("TG_API_HASH")
-TG_CHANNEL = os.getenv("TG_CHANNEL")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TG_CHANNEL = os.getenv("TG_CHANNEL")  # channel ID like -100xxxxxxxxxx or @handle
 
-if not TG_BOT_TOKEN:
-    raise RuntimeError("TG_BOT_TOKEN is required. Refusing to use user auth.")
+if not TG_BOT_TOKEN or not TG_CHANNEL:
+    raise RuntimeError("Set TG_BOT_TOKEN and TG_CHANNEL in .env")
 
-_client: TelegramClient | None = None
-_client_lock = asyncio.Lock()
+API = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
 
-
-async def get_client() -> TelegramClient:
-    global _client
-    if _client is None:
-        async with _client_lock:
-            if _client is None:
-                _client = TelegramClient(
-                    "polymarket_copytrading_session", TG_API_ID, TG_API_HASH
-                )
-                await _client.start(bot_token=TG_BOT_TOKEN)
-    return _client
-
-
-async def send_markdown(msg: str) -> None:
-    client = await get_client()
-    try:
-        await client.send_message(
-            entity=TG_CHANNEL,
-            message=msg,
-            link_preview=False,
-            parse_mode="md",
-        )
-    except FloodWaitError as e:
-        await asyncio.sleep(e.seconds)
-        await client.send_message(
-            entity=TG_CHANNEL, message=msg, link_preview=False, parse_mode="md"
-        )
-    except ChannelPrivateError:
-        raise RuntimeError(
-            "Bot cannot post to TG_CHANNEL. Add the bot to the channel and grant Post Messages. "
-            "Prefer the numeric -100… channel ID."
-        )
+async def send_markdown(text: str):
+    """Fire-and-forget Markdown message."""
+    async with aiohttp.ClientSession() as s:
+        async with s.post(API, json={
+            "chat_id": TG_CHANNEL,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }, timeout=20) as r:
+            if r.status != 200:
+                body = await r.text()
+                raise RuntimeError(f"Telegram error {r.status}: {body}")

@@ -1,128 +1,101 @@
-# main.py (sync)
-import time
-import asyncio
+# main.py — copytrader loop: 1) get new trades, 2) mirror, 3) announce
+import os, json, time, asyncio
 from typing import Dict, Tuple
-import requests
+from dotenv import load_dotenv
 
-from utils.polymarket import get_market_price, create_order, tracked_wallets
-from utils.telegram import send_markdown
+from polymarket import (
+    fetch_trades_for_user, trade_ptr,
+    market_buy_notional, market_sell_notional,
+)
+from telegram import send_markdown
 
-SESSION = requests.Session()
-SESSION.headers.update({"Accept": "application/json"})
+load_dotenv()
 
-DATA_API = "https://data-api.polymarket.com"
-POLL_INTERVAL = 2.0  # seconds
+# --- config ---
+TRADE_SCALE = float(os.getenv("TRADE_SCALE", "1.0"))   # 1.0=same notional as source
+POLL_SEC = float(os.getenv("POLL_SEC", "2.0"))
 
-# wallet -> (timestamp, txhash)
-LastPtr = Tuple[int, str]
-last_seen: Dict[str, LastPtr] = {}
+TARGETS: Dict[str,str] = {  # wallet -> name
+    "0xd218e474776403a330142299f7796e8ba32eb5c9": "cigarettes",
+    # add more …
+}
 
+CURSORS_FILE = os.getenv("CURSORS_FILE", "last_seen.json")
 
-def fetch_user_trades(wallet: str, limit: int = 50):
-    r = SESSION.get(
-        f"{DATA_API}/trades", params={"user": wallet, "limit": limit}, timeout=6
-    )
-    r.raise_for_status()
-    data = r.json()
-    return data if isinstance(data, list) else data.get("trades", [])
-
-
-def ptr_of(t: dict) -> LastPtr:
-    return (int(t.get("timestamp", 0)), t.get("transactionHash", "") or "")
-
-
-def bootstrap_from_api():
-    for w in (
-        tracked_wallets if isinstance(tracked_wallets, list) else tracked_wallets.keys()
-    ):
-        trades = fetch_user_trades(w, limit=1)
-        if trades:
-            last_seen[w] = ptr_of(trades[0])
-        else:
-            last_seen[w] = (int(time.time()), "")
-
-
-def notify_sync_copied(t: dict, name: str):
-    token_id = t["asset"]
-    side = t["side"]
-    size = float(t["size"])
-    ref_price = float(t["price"])
-    timestamp = int(t["timestamp"])
-    tx = t.get("transactionHash", "") or ""
-    msg = (
-        f"*Copied Trade*\n"
-        f"{name} — {side} {size} @ {ref_price}\n"
-        f"`token_id:` `{token_id}`\n"
-        f"`tx:` `{tx}`\n"
-        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(timestamp))} UTC"
-    )
-    asyncio.run(send_markdown(msg))
-
-
-def handle_trade_sync(t: dict) -> bool:
-    """Return True if order placed, else False."""
+def load_cursors() -> Dict[str, Tuple[int,str,int]]:
     try:
-        token_id = t["asset"]
-        side = t["side"]
-        size = float(t["size"])
+        data = json.load(open(CURSORS_FILE))
+        return {w: tuple(v) for w, v in data.items()}
+    except Exception:
+        return {}
 
-        # Use the REST price endpoint directly with requests for sync flow
-        r = SESSION.get(
-            "https://clob.polymarket.com/price",
-            params={"token_id": token_id, "side": side},
-            timeout=6,
-        )
-        r.raise_for_status()
-        market_price = float(r.json()["price"])
+def save_cursors(c):
+    json.dump({w:list(v) for w,v in c.items()}, open(CURSORS_FILE, "w"))
 
-        resp = create_order(price=market_price, size=size, side=side, token_id=token_id)
-        return bool(resp)
-    except Exception as e:
-        print(f"[handle_trade_sync] Error: {e}")
+def format_announce(t: dict, name: str, ok: bool) -> str:
+    side = "BUY" if t.get("is_buy") else "SELL"
+    title = t.get("title") or t.get("question") or ""
+    price = float(t.get("price") or 0.0)
+    amt   = float(t.get("amount") or 0.0)
+    when  = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(t.get("timestamp") or 0)))
+    status = "✅ mirrored" if ok else "❌ mirror failed"
+    return (
+        f"*{name}* — *{side}* {amt:.2f} @ {price:.3f}\n"
+        f"{title}\n"
+        f"`token_id:` `{t.get('token_id','')}`\n"
+        f"`tx:` `{t.get('tx_hash','')}`\n"
+        f"{when}\n\n"
+        f"{status}"
+    )
+
+def mirror_trade(t: dict) -> bool:
+    # Polymarket data API "amount" is USDC notional for the trade (buyer/seller view).
+    notional = float(t.get("amount") or 0.0) * TRADE_SCALE
+    token_id = t.get("token_id")
+    if not token_id or notional <= 0:
         return False
-
+    if t.get("is_buy"):
+        return market_buy_notional(token_id, notional)
+    else:
+        return market_sell_notional(token_id, notional)
 
 def main():
-    # normalize tracked_wallets to dict
-    wallets: Dict[str, str] = (
-        tracked_wallets
-        if isinstance(tracked_wallets, dict)
-        else {w: w[:6] + "…" + w[-4:] for w in tracked_wallets}
-    )
-
-    bootstrap_from_api()
+    cursors = load_cursors()
+    print(f"[init] TRADE_SCALE={TRADE_SCALE}, polling={POLL_SEC}s; wallets={len(TARGETS)}")
 
     while True:
-        start = time.time()
-        for wallet, name in wallets.items():
+        sweep = time.time()
+        for wallet, name in TARGETS.items():
             try:
-                trades = fetch_user_trades(wallet, limit=50)
-                if not trades:
-                    continue
+                ls = cursors.get(wallet, (0,"",0))
+                items = fetch_trades_for_user(wallet, limit=50)   # newest first
+                if items:
+                    newest = trade_ptr(items[0])
+                    print(f"[poll] {name} count={len(items)} newest={newest} last_seen={ls}")
 
-                trades.sort(
-                    key=lambda t: (
-                        int(t.get("timestamp", 0)),
-                        t.get("transactionHash", "") or "",
-                    )
-                )
-
-                for t in trades:
-                    cur = ptr_of(t)
-                    if last_seen.get(wallet) and cur <= last_seen[wallet]:
-                        continue
-
-                    placed = handle_trade_sync(t)
-                    if placed:
-                        notify_sync_copied(t, name)
-                    last_seen[wallet] = cur
-
+                # iterate newest->oldest; send only strictly newer
+                for t in items:
+                    cur = trade_ptr(t)
+                    if cur > ls:
+                        ok = mirror_trade(t)
+                        msg = format_announce(t, name, ok)
+                        asyncio.run(send_markdown(msg))
+                        cursors[wallet] = cur
+                        ls = cur
+                    else:
+                        # debug skip
+                        # print(f"[skip] {name} {cur} <= {ls}")
+                        pass
             except Exception as e:
-                print(f"[main loop] {wallet} error: {e}")
+                print(f"[error] {name}: {e}")
+        save_cursors(cursors)
 
-        elapsed = time.time() - start
-        time.sleep(max(0.1, POLL_INTERVAL - elapsed + 0.05))
+        # heartbeat every ~10 mins
+        if int(time.time()) % 600 < 2:
+            asyncio.run(send_markdown("_heartbeat: copytrader alive_"))
 
+        # keep cadence
+        time.sleep(max(0.1, POLL_SEC - (time.time() - sweep)))
 
 if __name__ == "__main__":
     main()

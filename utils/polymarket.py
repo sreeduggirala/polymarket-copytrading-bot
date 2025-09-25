@@ -1,98 +1,85 @@
+# polymarket.py — thin Polymarket wrappers (Data API + CLOB; SELL uses shares)
 import os
-import aiohttp
+import requests
+from typing import Dict, List, Tuple, Optional, Any
+
 from dotenv import load_dotenv
-from typing import Optional, List, Dict
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY, SELL
 
 load_dotenv()
 
-HOST = "https://clob.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
+CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("POLYMARKET_PROXY_ADDRESS")
+if not PRIVATE_KEY or not FUNDER:
+    raise RuntimeError("Set PRIVATE_KEY and POLYMARKET_PROXY_ADDRESS in .env")
 
-scalar = 0.01
-
-if not PRIVATE_KEY:
-    raise RuntimeError("PRIVATE_KEY is not set")
-
-client = ClobClient(
-    HOST,
-    key=PRIVATE_KEY,
-    chain_id=CHAIN_ID,
-    signature_type=2,
-    funder=FUNDER,
-)
-client.set_api_creds(client.create_or_derive_api_creds())
-
-
-async def get_market_price(
-    session: aiohttp.ClientSession, token_id: str, side: str
-) -> Optional[float]:
-    try:
-        async with session.get(
-            f"{HOST}/price", params={"token_id": token_id, "side": side}
-        ) as resp:
-            if resp.status != 200:
-                print(f"[get_market_price] Status: {resp.status}")
-                return None
-            data = await resp.json()
-            return float(data["price"])
-    except Exception as e:
-        print(f"[get_market_price] Error: {e}")
-        return None
-
-
-async def fetch_user_trades(
-    session: aiohttp.ClientSession, wallet: str, limit: int = 50
-) -> Optional[List[Dict]]:
-    try:
-        async with session.get(
-            f"{DATA_API}/trades", params={"user": wallet, "limit": limit}
-        ) as resp:
-            if resp.status != 200:
-                print(f"[fetch_user_trades] Status: {resp.status}")
-                return None
-            data = await resp.json()
-            if isinstance(data, list):
-                return data
-            return data.get("trades", [])
-    except Exception as e:
-        print(f"[fetch_user_trades] Error: {e}")
-        return None
-
-
-async def get_total_position_value(
-    session: aiohttp.ClientSession, wallet: str
-) -> Optional[float]:
-    try:
-        async with session.get(f"{DATA_API}/value", params={"user": wallet}) as resp:
-            if resp.status != 200:
-                print(f"[get_total_position_value] Status: {resp.status}")
-                return None
-            data = await resp.json()
-            return float(data["value"])
-    except Exception as e:
-        print(f"[get_total_position_value] Error: {e}")
-        return None
-
-
-def create_order(
-    price: float,
-    size: float,
-    side: str,
-    token_id: str,
-    order_type: OrderType = OrderType.GTC,
-) -> Optional[Dict]:
-    try:
-        order_args = OrderArgs(
-            price=price, size=size, side=side.upper(), token_id=token_id
+_client: Optional[ClobClient] = None
+def clob() -> ClobClient:
+    global _client
+    if _client is None:
+        c = ClobClient(
+            host=CLOB_HOST,
+            key=PRIVATE_KEY,
+            chain_id=CHAIN_ID,
+            signature_type=2,
+            funder=FUNDER,
         )
-        signed = client.create_order(order_args)
-        return client.post_order(signed, order_type)
-    except Exception as e:
-        print(f"[create_order] Error: {e}")
-        return None
+        creds = c.create_or_derive_api_creds()
+        c.set_api_creds(creds)
+        _client = c
+    return _client
+
+# ---------- Data API (for tracking other wallets) ----------
+def fetch_trades_for_user(user: str, limit: int = 50) -> List[Dict[str, Any]]:
+    r = requests.get(f"{DATA_API}/trades", params={"user": user, "limit": limit}, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    return data if isinstance(data, list) else []
+
+def trade_ptr(t: Dict[str, Any]) -> Tuple[int, str, int]:
+    ts = int(t.get("timestamp") or 0)
+    tx = t.get("tx_hash") or ""
+    li = int(t.get("log_index") or 0)
+    return (ts, tx, li)
+
+# ---------- Quotes ----------
+def best_quotes(token_id: str) -> Tuple[Optional[float], Optional[float]]:
+    """Return (best_bid_price, best_ask_price) as floats using level 0, or (None, None)."""
+    ob = clob().get_order_book(token_id)
+    best_bid = float(ob.bids[0].price) if ob and ob.bids else None
+    best_ask = float(ob.asks[0].price) if ob and ob.asks else None
+    return best_bid, best_ask
+
+# ---------- Market order helpers ----------
+def market_buy_notional(token_id: str, notional_usdc: float) -> bool:
+    """BUY market: amount = USDC notional (per docs)."""
+    if notional_usdc <= 0:
+        return False
+    args = MarketOrderArgs(token_id=str(token_id), amount=float(notional_usdc), side=BUY)
+    order = clob().create_market_order(args)
+    resp = clob().post_order(order, OrderType.FOK)
+    return bool(resp.get("success"))
+
+def market_sell_notional(token_id: str, notional_usdc: float) -> bool:
+    """
+    SELL market must submit SHARES (per docs). We convert desired USDC notional
+    into shares using the current best bid. If no bid, we skip.
+    """
+    if notional_usdc <= 0:
+        return False
+    best_bid, _ = best_quotes(token_id)
+    if not best_bid or best_bid <= 0:
+        return False
+    shares = float(notional_usdc) / float(best_bid)  # convert notional -> shares
+    if shares <= 0:
+        return False
+    args = MarketOrderArgs(token_id=str(token_id), amount=shares, side=SELL)
+    order = clob().create_market_order(args)
+    resp = clob().post_order(order, OrderType.FOK)
+    return bool(resp.get("success"))
